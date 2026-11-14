@@ -1,0 +1,4 @@
+config/cookie.txt
+__pycache__/
+*.pyc
+.env

@@ -1,0 +1,20 @@
+# Portainer: Stacks -> Add stack -> Repository (this repo, compose path docker-compose.yml)
+# Set BLABLALINK_COOKIE (and BLABLALINK_ALLOWED_HOSTS) in the stack's Environment variables.
+services:
+  blablalink-mcp:
+    build: .
+    image: blablalink-mcp:local
+    container_name: blablalink-mcp
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      TZ: Asia/Taipei
+      BLABLALINK_COOKIE: ${BLABLALINK_COOKIE:-}
+      # hostnames/IPs allowed to call the server, e.g. nikke.engramm.net,192.168.1.10:*
+      BLABLALINK_ALLOWED_HOSTS: ${BLABLALINK_ALLOWED_HOSTS:-localhost:*,127.0.0.1:*}
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    mem_limit: 256m
