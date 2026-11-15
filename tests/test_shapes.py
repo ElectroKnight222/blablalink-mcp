@@ -227,3 +227,29 @@ def test_union_raid_season(fake, monkeypatch):
     mine = run(s.get_union_raid(member="me"))["attacks"]
     assert len(mine) == 1 and mine[0]["day"] == 1 and mine[0]["squad"][0]["name"] == "Test Attacker"
     assert "live" not in r and "live_error" not in r
+
+
+# ---- dynamic layer
+
+def test_parse_api_methods():
+    js = ("var e=`prod`,a=e=>t=>`${e}${t}`,o=a(`/user`),h=a(`/game/proxy/Game`),g=a(`/game/direct/Game`),"
+          "x=a(`/game/proxy/Tools`);var C=o(`/Login`),nn=g(`/GetCdkRedemption`),rn=h(`/GetCdkRedemption`),"
+          "An=h(`/RecordCdkRedemption`);x(`/GetNikkesOrder`);var q=c(`/Not/A/Base`)")
+    assert s.parse_api_methods(js) == ["/game/direct/Game/GetCdkRedemption", "/game/proxy/Game/GetCdkRedemption",
+                                       "/game/proxy/Game/RecordCdkRedemption", "/game/proxy/Tools/GetNikkesOrder",
+                                       "/user/Login"]
+
+
+def test_call_game_api_guard_and_area_retry(fake):
+    responses, calls = fake
+    s.bla._area_id = 99
+    assert "error" in run(s.call_game_api("RecordCdkRedemption", {"cdkey": "X"}))
+
+    def strict(extra):
+        if "area_id" not in extra:
+            raise s.BlablaError("param invalid", 1303001)
+        return {"list": [{"slot": 1, "tid": 900103, "combat": 1}]}
+    responses["GetMainQuestClearLineup"] = strict
+    r = run(s.call_game_api("GetMainQuestClearLineup", {"stage_id": 6001002}))
+    assert calls[-1] == ("GetMainQuestClearLineup", {"stage_id": 6001002, "area_id": 99})
+    assert r["list"][0]["nikke_name"] == "Test Attacker" and r["list"][0]["limit_break"] == 2

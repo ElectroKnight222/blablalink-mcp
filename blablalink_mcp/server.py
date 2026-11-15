@@ -1030,13 +1030,82 @@ async def get_event_calendar(lang: str = LANG) -> dict:
 
 # ---------------------------------------------------------------- tools: raw access
 
+SITE = "https://www.blablalink.com/"
+GAME_PROXY = "/game/proxy/Game"
+
+
+def parse_api_methods(api_js: str) -> list[str]:
+    """Every endpoint path defined in blablalink's api-<hash>.js (minified).
+
+    The file defines service bases with one builder function (e.g. h=a(`/game/proxy/Game`)) and
+    endpoints by calling those bases (e.g. nn=h(`/GetCdkRedemption`))."""
+    defs = re.findall(r"(\w{1,3})=(\w{1,3})\(`(/[^`]*)`\)", api_js)
+    builder = next((fn for _, fn, p in defs if p == GAME_PROXY), None)
+    if not builder:
+        return []
+    bases = {v: p for v, fn, p in defs if fn == builder}
+    found = {bases[fn] + sub for fn, sub in re.findall(r"\b(\w{1,3})\(`(/[A-Za-z0-9_/]+)`\)", api_js) if fn in bases}
+    return sorted(found)
+
+
+async def _site_api_methods() -> tuple[str, list[str]]:
+    hit = _cache.get("site:api")
+    if hit and time.time() - hit[0] < CACHE_TTL:
+        return hit[1]
+    ua = {"User-Agent": bla.headers(auth=False)["User-Agent"]}
+    html = (await bla.client.get(SITE, headers=ua)).text
+    m = re.search(r'src="(https://www\.blablalink\.com/assets/[^"]*/index-[A-Za-z0-9_-]+\.js)"', html)
+    if not m:
+        raise BlablaError("could not find blablalink's main script on the homepage")
+    index_url = m.group(1)
+    a = re.search(r"(api-[A-Za-z0-9_-]+\.js)", (await bla.client.get(index_url, headers=ua)).text)
+    if not a:
+        raise BlablaError("could not find blablalink's api script")
+    api_url = index_url.rsplit("/", 1)[0] + "/" + a.group(1)
+    result = (api_url, parse_api_methods((await bla.client.get(api_url, headers=ua)).text))
+    _cache["site:api"] = (time.time(), result)
+    return result
+
+
+@mcp.tool()
+async def list_game_api_methods(filter: str = "") -> dict:
+    """Discover blablalink's read-only game API methods live from the website's own code
+    (cached for a few hours). Methods marked callable can be used with call_game_api.
+
+    filter: case-insensitive text matched against the method name, e.g. "Raid", "Union".
+    """
+    source, paths = await _site_api_methods()
+    methods = []
+    for p in paths:
+        name = p.rsplit("/", 1)[1]
+        if not p.startswith("/game/") or not name.startswith("Get"):
+            continue
+        if filter and filter.lower() not in name.lower():
+            continue
+        methods.append({"name": name, "path": p.rsplit("/", 1)[0], "callable": p.startswith(GAME_PROXY + "/")})
+    return {"fetched_at": _ts(_cache["site:api"][0]), "source": source, "count": len(methods), "methods": methods}
+
+
 @mcp.tool()
 async def call_game_api(method: str, extra_body: dict | None = None) -> Any:
-    """Escape hatch: call a read-only blablalink game method (POST /api/game/proxy/Game/<method>)
-    with your intl_open_id and server filled in. Only Get* methods are allowed."""
+    """Escape hatch: call any read-only blablalink game method (POST /api/game/proxy/Game/<method>)
+    with your account id and server filled in. Only Get* methods are allowed. Readable names are
+    added next to unit, squad, stage, element and time fields in the result.
+
+    extra_body: method-specific parameters, e.g. {"stage_id": 6040043} or
+    {"guild_id": "...", "season_id": "..."}. area_id is added automatically if the method needs it.
+    """
     if not re.fullmatch(r"Get[A-Za-z0-9]+", method):
         return {"error": "only Get* methods are allowed"}
-    return await bla.game(method, extra_body)
+    extra = dict(extra_body or {})
+    try:
+        data = await bla.game(method, extra)
+    except BlablaError as e:
+        if e.code != 1303001 or "area_id" in extra:  # 1303001 = param invalid
+            raise
+        extra["area_id"] = await bla.area_id()  # ShiftyPad-style methods want area_id
+        data = await bla.game(method, extra)
+    return (await translator())(data)
 
 
 def main() -> None:
