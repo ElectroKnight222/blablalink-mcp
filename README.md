@@ -25,24 +25,22 @@ this repo.
 | `get_event_calendar` | Banners, events, arena/raid seasons with dates |
 | `call_game_api` | Escape hatch for other read-only `Get*` game methods |
 
-## Deploy with Portainer (from this repo)
+## How it's built and deployed
 
-1. Portainer → Stacks → Add stack → **Repository**.
-   - Repository URL: `http://<NAS IP>:3300/ElectroKnight22/blablalink-mcp.git`
-   - Reference: `refs/heads/main`, compose path: `docker-compose.yml`
-   - Authentication: your Forgejo username + an access token with repository read access.
-2. Environment variables:
-   - `BLABLALINK_COOKIE`: the Cookie header from any `api.blablalink.com` request
-     (log in at www.blablalink.com → F12 → Network → filter `api.blablalink` → copy `Cookie:`).
-   - `BLABLALINK_ALLOWED_HOSTS`: `nikke.engramm.net,<NAS IP>:*,localhost:*,127.0.0.1:*`
-3. Deploy, then check from the container's console (or SSH):
-   ```
-   docker exec blablalink-mcp python -m blablalink_mcp.selftest
-   ```
-   It prints only OK/FAIL and counts, no personal IDs.
+- **Primary repo:** `git.engramm.net/ElectroKnight22/blablalink-mcp`. Changes land on `main` through reviewed PRs.
+- **Build:** Forgejo push-mirrors the repo to `github.com/ElectroKnight222/blablalink-mcp`. GitHub Actions
+  (`.github/workflows/build-image.yml`) builds the image from `main` only and publishes
+  `ghcr.io/electroknight222/blablalink-mcp:latest` (plus a `sha-<commit>` tag).
+- **Run:** Portainer → Stacks → Add stack → Web editor → paste `docker-compose.yml`.
+  Environment variables:
+  - `BLABLALINK_COOKIE`: the Cookie header from any `api.blablalink.com` request
+    (log in at www.blablalink.com → F12 → Network → filter `api.blablalink` → copy `Cookie:`).
+  - `BLABLALINK_ALLOWED_HOSTS` (optional): defaults to `10.22.10.2:*,localhost:*,127.0.0.1:*`.
+- **Update** after a merge: wait for the GitHub build to finish, then open the stack →
+  Update the stack with **Re-pull image** on.
+- **Self-test:** container Console → `python -m blablalink_mcp.selftest` (prints only OK/FAIL and counts).
 
-To update after merging a PR: open the stack → **Pull and redeploy**.
-When the cookie expires (`check_login` says not logged in), update the env var and redeploy.
+When the cookie expires (`check_login` says not logged in), update the env var and update the stack.
 
 The container runs as non-root with a read-only filesystem and no Linux capabilities.
 
