@@ -706,11 +706,206 @@ async def get_union(include_members: bool = True) -> dict:
     return result
 
 
+RAID_DIFFICULTY = {1: "Normal", 2: "Hard"}
+
+
+def _boss(b: dict, lang: str) -> dict:
+    names = b.get("name_localvalues") or {}
+    desc = (b.get("desc_localvalues") or {}).get("en") or ""
+    code = re.search(r"Code:\s*([^\n]+)", desc)
+    grade = re.search(r"Grade:\s*([^\n]+)", desc)
+    cur, mx = _int(b.get("current_hp")), _int(b.get("max_hp"))
+    return {"name": names.get(lang.lower()) or names.get("en"), "code": code.group(1).strip() if code else None,
+            "grade": grade.group(1).strip() if grade else None,
+            "element": BOSS_ELEMENTS.get(str((b.get("element_id") or [""])[0])),
+            "hp_left_pct": round(cur / mx * 100, 1) if cur is not None and mx else None,
+            "hp_left": cur, "max_hp": mx}
+
+
 @mcp.tool()
-async def get_union_raid(season: bool = False) -> dict:
-    """Union Raid data for the user's union: current raid (default) or the whole season (season=True)."""
-    method = "GetUnionRaidDataOfGuildSeason" if season else "GetUnionRaidData"
-    return (await translator())(await bla.game(method))
+async def get_union_raid(season: str = "latest", member: str = "", include_attacks: bool = False,
+                         lang: str = LANG) -> dict:
+    """Union Raid for the user's union: season dates, bosses with HP left, damage per member,
+    and (when asked) every attack with the squad used. Raid records belong to the union, so
+    raids done in a previous union are not included.
+
+    season: "latest" (most recent season that has started), a season id, or "list" for all seasons.
+    member: "me" or a nickname to list just that member's attacks (implies include_attacks).
+    include_attacks: list every attack with its squad (large for a full union).
+    """
+    seasons = await cdn_json("raid/raid_list.json")
+    if season == "list":
+        return {"seasons": [{"id": str(x.get("id")), "start": _iso_local(x.get("season_start_date")),
+                             "end": _iso_local(x.get("season_end_date")),
+                             "results": _iso_local(x.get("caculate_date"))} for x in seasons]}
+    now = time.time()
+    if season == "latest":
+        started = [x for x in seasons if (x.get("start_ts") or 0) <= now]
+        pick = started[-1] if started else None
+    else:
+        pick = next((x for x in seasons if str(x.get("id")) == str(season)), None)
+    if not pick:
+        return {"error": f"season {season!r} not found; use season='list'"}
+    card = await _my_union()
+    if not card.get("guild_id"):
+        return {"error": "not in a union"}
+    gid = card["guild_id"]
+    body = {"area_id": await bla.area_id(), "guild_id": gid, "season_id": str(pick["id"])}
+    levels_raw, attacks_raw, chars = await asyncio.gather(
+        bla.game("GetUnionRaidLevelDataOfGuildSeason", body),
+        bla.game("GetUnionRaidDataOfGuildSeason", body), characters(), return_exceptions=True)
+    if isinstance(chars, BaseException):
+        raise chars
+    base = base_index(chars)
+    result: dict[str, Any] = {
+        "union": card.get("guild_name"),
+        "season": {"id": str(pick["id"]), "start": _iso_local(pick.get("season_start_date")),
+                   "end": _iso_local(pick.get("season_end_date")), "results": _iso_local(pick.get("caculate_date"))},
+    }
+    if isinstance(levels_raw, BaseException):
+        result["levels_error"] = str(levels_raw)
+    else:
+        result["levels"] = [{"difficulty": RAID_DIFFICULTY.get(lv.get("difficulty"), lv.get("difficulty")),
+                             "level": lv.get("level"), "bosses": [_boss(b, lang) for b in lv.get("boss_info") or []]}
+                            for lv in (levels_raw or {}).get("level_info") or []]
+    if isinstance(attacks_raw, BaseException):
+        result["attacks_error"] = str(attacks_raw)
+        attacks = []
+    else:
+        attacks = (attacks_raw or {}).get("participate_data") or []
+    totals: dict[str, dict] = {}
+    for a in attacks:
+        t = totals.setdefault(a.get("nickname") or "?", {"nickname": a.get("nickname"), "attacks": 0, "total_damage": 0})
+        t["attacks"] += 1
+        t["total_damage"] += _int(a.get("total_damage")) or 0
+    result["members"] = sorted(totals.values(), key=lambda t: -t["total_damage"])
+    if member or include_attacks:
+        me = bla.open_id
+        sel = [a for a in attacks if not member
+               or (member.lower() == "me" and a.get("openid") == me)
+               or (member.lower() != "me" and member.lower() in (a.get("nickname") or "").lower())]
+        result["attacks"] = [{
+            "member": a.get("nickname"), "day": (a.get("day") or 0) + 1,
+            "difficulty": RAID_DIFFICULTY.get(a.get("difficulty"), a.get("difficulty")),
+            "level": a.get("level"), "step": a.get("step"),
+            "boss": (a.get("name_localvalues") or {}).get(lang.lower()) or (a.get("name_localvalues") or {}).get("en"),
+            "element": BOSS_ELEMENTS.get(str((a.get("element_id") or [""])[0])),
+            "damage": _int(a.get("total_damage")), "final_hit": bool(a.get("is_final_hit")),
+            "squad": [squad_entry(sq, chars, base) for sq in sorted(a.get("squad") or [], key=lambda q: q.get("slot") or 0)],
+        } for a in sel]
+    if (pick.get("start_ts") or 0) <= now <= (pick.get("caculate_ts") or 0) + 86400:
+        # A raid is running: blablalink also has a live view (shape only visible during a raid).
+        try:
+            result["live"] = (await translator())(await bla.game("GetUnionRaidData", {"guild_id": gid}))
+        except BlablaError as e:
+            result["live_error"] = str(e)
+    return result
+
+
+# ---------------------------------------------------------------- tools: campaign and dailies
+
+async def _clear(sid: int, chars: dict, base: dict, st: dict) -> dict:
+    s = st.get(sid) or {}
+    head = {"stage": s.get("name"), "mode": s.get("mode"), "stage_id": sid}
+    try:
+        d = await bla.game("GetMainQuestClearLineup", {"stage_id": sid, "area_id": await bla.area_id()})
+    except BlablaError as e:
+        return {**head, "error": str(e)}
+    squad = [squad_entry(x, chars, base) for x in sorted((d or {}).get("list") or [], key=lambda x: x.get("slot") or 0)]
+    if not squad:
+        return {**head, "error": "no clear record for this stage"}
+    return {**head, "cleared_at": _ts((d or {}).get("cleared_at")),
+            "total_power": sum(x["combat_power"] or 0 for x in squad),
+            "stage_standard_power": s.get("standard_power"), "squad": squad}
+
+
+@mcp.tool()
+async def get_clear_team(stage: str = "", mode: str = "normal") -> dict:
+    """The squad the user cleared a campaign stage with: five units with limit break, core, level
+    and power at clear time, plus clear time and the stage's standard power.
+
+    stage: e.g. "40-35" or "SUB 22-1". Empty = the user's latest Normal and Hard clears.
+    mode: normal, hard or story.
+    """
+    chars, st = await asyncio.gather(characters(), stages())
+    base = base_index(chars)
+    if not stage:
+        bi = ((await bla.game("GetUserProfileBasicInfo")) or {}).get("basic_info") or {}
+        latest = {}
+        for m, k in (("normal", "progress_normal_campaign"), ("hard", "progress_hard_campaign")):
+            if _int(bi.get(k)):
+                latest[m] = await _clear(int(bi[k]), chars, base, st)
+        return {"latest": latest}
+    m = STAGE_MODES.get(mode.lower())
+    if not m:
+        return {"error": f"mode must be one of {list(STAGE_MODES)}"}
+    want = stage_short_name(stage).upper()
+    sid = next((i for i, s in st.items() if s["mode"] == m and s["name"].upper() == want), None)
+    if sid is None:
+        return {"error": f"no {m} stage named {stage!r}"}
+    return await _clear(sid, chars, base, st)
+
+
+@mcp.tool()
+async def get_daily_progress() -> dict:
+    """Today's progress: daily/weekly mission points (received and still claimable), Interception
+    tickets, Rookie/Special Arena attempts, counseling, daily manufacturer tower attempts,
+    outpost storage fullness, dispatch status and best daily Simulation Room record."""
+    d = ((await bla.game("GetUserDailyContentsProgress")) or {}).get("daily_progress") or [{}]
+    p = d[0] if d else {}
+    used = {"daily_mission_received_points", "daily_mission_receivable_points", "daily_mission_received_rewards",
+            "weekly_mission_received_points", "weekly_mission_receivable_points", "weekly_mission_received_rewards",
+            "intercept_remaining_tickets", "rookie_arena_remaining_count", "special_arena_remaining_count",
+            "counsel_remaining_count", "tower_daily_info_list", "outpost_battle_storage_fullness",
+            "outpost_battle_storage_excess", "outpost_battle_efficiency", "dispatch_in_progress_count",
+            "dispatch_completed_count", "sim_room_daily_best_record"}
+    full = p.get("outpost_battle_storage_fullness")
+    return {
+        "daily_missions": {"received": p.get("daily_mission_received_points"),
+                           "claimable": p.get("daily_mission_receivable_points")},
+        "weekly_missions": {"received": p.get("weekly_mission_received_points"),
+                            "claimable": p.get("weekly_mission_receivable_points")},
+        "interception_tickets": p.get("intercept_remaining_tickets"),
+        "rookie_arena_left": p.get("rookie_arena_remaining_count"),
+        "special_arena_left": p.get("special_arena_remaining_count"),
+        "counseling_left": p.get("counsel_remaining_count"),
+        "manufacturer_towers": [{"tower_type": t.get("type"), "opened": t.get("is_opened"),
+                                 "attempts_left": t.get("remaining_count")} for t in p.get("tower_daily_info_list") or []],
+        "outpost": {"storage_fullness_pct": round(full * 100, 1) if isinstance(full, (int, float)) else None,
+                    "storage_excess": p.get("outpost_battle_storage_excess"),
+                    "efficiency": p.get("outpost_battle_efficiency")},
+        "dispatch": {"in_progress": p.get("dispatch_in_progress_count"), "completed": p.get("dispatch_completed_count")},
+        "simulation_room_best": p.get("sim_room_daily_best_record"),
+        "other_fields": _rest(p, used),
+    }
+
+
+# ---------------------------------------------------------------- tools: CDK codes
+
+@mcp.tool()
+async def get_cdk_codes() -> dict:
+    """Current NIKKE redeem codes (CDKs) listed on blablalink and whether the user already
+    redeemed each one, unredeemed first."""
+    d = await bla.game("GetCdkRedemption", {"intl_game_id": GAME_ID})
+    codes = [{"code": c.get("cdk"), "redeemed": c.get("status") == 1, "status": c.get("status"),
+              "valid_from": _ts(c.get("valid_time_start")), "expires": _ts(c.get("valid_time_end"))}
+             for c in (d or {}).get("cdk_redemption_list") or []]
+    codes.sort(key=lambda c: c["redeemed"])
+    return {"unredeemed": sum(not c["redeemed"] for c in codes), "codes": codes}
+
+
+@mcp.tool()
+async def redeem_cdk(code: str) -> dict:
+    """Redeem a NIKKE code (CDK) to the user's game account; rewards arrive in in-game mail.
+    This changes account state, so only call it when the user asks."""
+    code = (code or "").strip()
+    if not code:
+        return {"ok": False, "reason": "empty code"}
+    try:
+        await bla.game("RecordCdkRedemption", {"cdkey": code})
+    except BlablaError as e:
+        return {"ok": False, "code": code, "reason": str(e)}
+    return {"ok": True, "code": code, "note": "check in-game mail for the rewards"}
 
 
 # ---------------------------------------------------------------- tools: blablalink points

@@ -159,3 +159,71 @@ def test_union_finds_guild_id_under_card(fake):
     assert u["union"]["top_percent"] == 5.0
     assert ("GetGuildMembers", {"guild_id": "77"}) in calls
     assert [m["is_me"] for m in u["members"]] == [False, True]
+
+
+# ---- new tools
+
+def test_clear_team_by_stage_name(fake):
+    responses, calls = fake
+    responses["GetUserGamePlayerInfo"] = {}
+    s.bla._area_id = 99
+    responses["GetMainQuestClearLineup"] = {"cleared_at": "1794687114", "list": [
+        {"slot": 2, "tid": 900205, "lv": 300, "combat": 20}, {"slot": 1, "tid": 900101, "lv": 300, "combat": 10}]}
+    r = run(s.get_clear_team("1-2", "normal"))
+    assert ("GetMainQuestClearLineup", {"stage_id": 6001002, "area_id": 99}) in calls
+    assert r["stage"] == "1-2" and r["total_power"] == 30 and r["stage_standard_power"] == 1000
+    assert [(x["name"], x["limit_break"], x["core"]) for x in r["squad"]] == [("Test Attacker", 0, 0), ("Test Defender", 3, 1)]
+    assert "error" in run(s.get_clear_team("99-99", "hard"))
+
+
+def test_daily_progress(fake):
+    responses, _ = fake
+    responses["GetUserDailyContentsProgress"] = {"daily_progress": [{
+        "daily_mission_received_points": 80, "daily_mission_receivable_points": 20,
+        "rookie_arena_remaining_count": 4, "outpost_battle_storage_fullness": 0.837,
+        "tower_daily_info_list": [{"type": 1, "is_opened": True, "remaining_count": 3}], "new_thing": 5}]}
+    d = run(s.get_daily_progress())
+    assert d["daily_missions"] == {"received": 80, "claimable": 20}
+    assert d["outpost"]["storage_fullness_pct"] == 83.7
+    assert d["manufacturer_towers"][0]["attempts_left"] == 3
+    assert d["other_fields"] == {"new_thing": 5}
+
+
+def test_cdk_codes_unredeemed_first(fake):
+    responses, _ = fake
+    responses["GetCdkRedemption"] = {"cdk_redemption_list": [
+        {"cdk": "OLD", "status": 1, "valid_time_end": "1795532399"},
+        {"cdk": "NEW", "status": 0, "valid_time_end": "1795532399"}]}
+    r = run(s.get_cdk_codes())
+    assert r["unredeemed"] == 1 and r["codes"][0]["code"] == "NEW"
+
+
+def test_union_raid_season(fake, monkeypatch):
+    responses, calls = fake
+    s.bla._area_id = 99
+    monkeypatch.setattr(s.time, "time", lambda: 2_000_000_000)
+
+    async def cdn(path):
+        assert path == "raid/raid_list.json"
+        return [{"id": 1, "start_ts": 100, "caculate_ts": 200, "season_start_date": "2026-01-01T20:00:00"},
+                {"id": 2, "start_ts": 300, "caculate_ts": 400, "season_start_date": "2026-02-01T20:00:00"}]
+    monkeypatch.setattr(s, "cdn_json", cdn)
+    responses["GetMyGuildInfo"] = {"card": {"guild_id": "77", "guild_name": "U"}}
+    responses["GetUnionRaidLevelDataOfGuildSeason"] = {"level_info": [{"difficulty": 2, "level": 1, "boss_info": [
+        {"name_localvalues": {"en": "Boss A"}, "desc_localvalues": {"en": "Code: X.Y.Z.\nGrade: Tyrant"},
+         "element_id": ["500001"], "current_hp": "50", "max_hp": "200"}]}]}
+    responses["GetUnionRaidDataOfGuildSeason"] = {"participate_data": [
+        {"nickname": "me", "openid": "111", "day": 0, "difficulty": 2, "level": 1, "step": 1, "total_damage": "10",
+         "name_localvalues": {"en": "Boss A"}, "element_id": ["500001"], "squad": [{"slot": 1, "tid": 900102, "lv": 1, "combat": 1}]},
+        {"nickname": "other", "openid": "5", "day": 1, "difficulty": 2, "level": 1, "step": 2, "total_damage": "30",
+         "name_localvalues": {"en": "Boss A"}, "element_id": ["500001"], "squad": []}]}
+    r = run(s.get_union_raid())
+    body = {"area_id": 99, "guild_id": "77", "season_id": "2"}
+    assert ("GetUnionRaidDataOfGuildSeason", body) in calls
+    boss = r["levels"][0]["bosses"][0]
+    assert boss == {"name": "Boss A", "code": "X.Y.Z.", "grade": "Tyrant", "element": "Electric",
+                    "hp_left_pct": 25.0, "hp_left": 50, "max_hp": 200}
+    assert [m["nickname"] for m in r["members"]] == ["other", "me"] and "attacks" not in r
+    mine = run(s.get_union_raid(member="me"))["attacks"]
+    assert len(mine) == 1 and mine[0]["day"] == 1 and mine[0]["squad"][0]["name"] == "Test Attacker"
+    assert "live" not in r and "live_error" not in r
