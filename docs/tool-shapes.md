@@ -28,6 +28,11 @@ Checked field by field against blablalink's live API responses (2026-11-16).
 | Tactics academy | `class 13000, lesson 13003` = 13-3 |
 | Overload value | `state_effects[].function_details[0]`: `abs(function_value) / 100` = percent, `level` = tier 1-15, `function_type` = stat. Match on `str(option_id)` (blablalink sends effect ids as strings) |
 
+## What blablalink does not expose
+The site code defines 24 read-only game methods in total (`list_game_api_methods`). None of
+them covers inventory/items, arena squads, saved squad presets, tower or Solo Raid squads.
+Squads are only available from campaign clears and Union Raid attacks.
+
 ## Tools
 
 ### Account and roster
@@ -76,7 +81,7 @@ Empty stage → latest Normal and Hard clears.
 ```
 { daily_missions: { received, claimable }, weekly_missions: { received, claimable },
   interception_tickets, rookie_arena_left, special_arena_left, counseling_left,
-  tribe_towers: [{ tower, opened, attempts_left }],
+  manufacturer_towers: [{ tower_type, opened, attempts_left }],   # tower_type 1-4 not mapped yet
   outpost: { storage_fullness_pct, storage_excess, efficiency },
   dispatch: { in_progress, completed },
   simulation_room_best: { chapter, difficulty } }
@@ -105,7 +110,7 @@ Raid records belong to the union, not the player (raids in a previous union are 
 **daily_checkin()**: unchanged.
 
 ### Public info
-**get_event_calendar(lang)**: per module `{ items: [{ name, description, start, end, … }] }`, ids and subscribe flags dropped.
+**get_event_calendar(lang)**: per module `{ items: [{ name, description, start_time, end_time, … }] }` (local time), ids and subscribe flags dropped.
 **get_news(board, limit, lang, cursor)** → `{ posts: [{ post_uuid, title, posted, preview, views, likes, comments, pinned, url }], next_cursor }`
 **read_post(post_uuid, lang)** → `{ title, posted, text, views, likes, comments, url }`
 

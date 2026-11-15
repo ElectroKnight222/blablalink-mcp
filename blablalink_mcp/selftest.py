@@ -9,10 +9,15 @@ async def main() -> None:
         ("roster", s.get_roster()),
         ("overview", s.get_account_overview()),
         ("builds", s.get_character_builds(["Crown"])),
+        ("clear team", s.get_clear_team()),
+        ("daily", s.get_daily_progress()),
         ("union", s.get_union(include_members=False)),
+        ("union raid", s.get_union_raid()),
+        ("cdk codes", s.get_cdk_codes()),
         ("points", s.get_blablalink_tasks()),
         ("news", s.get_news(limit=1)),
         ("calendar", s.get_event_calendar()),
+        ("discovery", s.list_game_api_methods()),
     ]:
         try:
             r = await coro
