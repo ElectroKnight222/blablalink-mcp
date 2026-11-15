@@ -916,6 +916,21 @@ async def _tasks() -> list[dict]:
     return (d or {}).get("tasks") or []
 
 
+CHECKIN_TASK_TYPE = 1  # "Daily Sign-in" (task_type 2 is "[Daily] Play Game")
+CHECKIN_NAME = re.compile(r"sign.?in|check.?in|簽到|签到|출석", re.I)
+
+
+def checkin_task(tasks: list[dict]) -> dict | None:
+    """The daily sign-in task: by task_type first (language independent), then by name."""
+    return (next((t for t in tasks if t.get("task_type") == CHECKIN_TASK_TYPE), None)
+            or next((t for t in tasks if CHECKIN_NAME.search(t.get("task_name") or "")), None))
+
+
+def task_done(task: dict | None) -> bool | None:
+    ri = (task or {}).get("reward_infos") or []
+    return all(r.get("is_completed") for r in ri) if ri else None
+
+
 @mcp.tool()
 async def get_blablalink_tasks() -> dict:
     """blablalink community points (balance, earned, spent), whether today's check-in is done,
@@ -926,16 +941,20 @@ async def get_blablalink_tasks() -> dict:
     for t in tasks:
         ri = t.get("reward_infos") or []
         rows.append({
-            "task_id": t.get("task_id"), "name": t.get("task_name"), "details": t.get("details") or None,
+            "task_id": t.get("task_id"), "name": t.get("task_name"),
+            "details": _strip_html(t.get("details") or "") or None,
             "points": [r.get("points") for r in ri],
-            "completed": all(r.get("is_completed") for r in ri) if ri else None,
+            "completed": task_done(t),
             "progress": [f"{r.get('completed_times', 0)}/{r.get('need_completed_times', 0)}" for r in ri],
+            # sign_today is not used by blablalink's own site and stays false even after
+            # checking in, so it is only passed through, not interpreted.
+            "other_fields": {"sign_today": t.get("sign_today"), "task_type": t.get("task_type")},
         })
     return {
         "total_points": (pts or {}).get("total_points"),
         "earned": (pts or {}).get("total_points_earned"),
         "spent": (pts or {}).get("total_points_consumed"),
-        "checked_in_today": any(t.get("sign_today") for t in tasks),
+        "checked_in_today": task_done(checkin_task(tasks)),
         "tasks": rows,
     }
 
@@ -945,12 +964,10 @@ async def daily_checkin() -> dict:
     """Claim today's blablalink daily check-in points (does nothing if already claimed).
     This changes account state, so only call it when the user asks."""
     tasks = await _tasks()
-    task = next((t for t in tasks if re.search(r"簽到|签到|check.?in|출석|ログイン|ボーナス",
-                                              t.get("task_name") or "", re.I)), None)
+    task = checkin_task(tasks)
     if not task:
         return {"ok": False, "reason": "check-in task not found", "tasks": [t.get("task_name") for t in tasks]}
-    rewards = task.get("reward_infos") or []
-    if rewards and all(r.get("is_completed") for r in rewards):
+    if task_done(task):
         return {"ok": True, "already_claimed": True, "task": task.get("task_name")}
     await bla.call("/api/lip/proxy/lipass/Points/DailyCheckIn", {"task_id": task.get("task_id")})
     pts = await bla.call("/api/lip/proxy/lipass/Points/GetUserTotalPoints", method="GET")

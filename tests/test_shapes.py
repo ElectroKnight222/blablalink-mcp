@@ -253,3 +253,38 @@ def test_call_game_api_guard_and_area_retry(fake):
     r = run(s.call_game_api("GetMainQuestClearLineup", {"stage_id": 6001002}))
     assert calls[-1] == ("GetMainQuestClearLineup", {"stage_id": 6001002, "area_id": 99})
     assert r["list"][0]["nikke_name"] == "Test Attacker" and r["list"][0]["limit_break"] == 2
+
+
+# ---- points tasks / check-in
+
+TASKS = [
+    {"task_id": "14", "task_name": "[Daily] Play Game", "task_type": 2, "sign_today": False,
+     "reward_infos": [{"is_completed": True, "points": 100, "completed_times": 1, "need_completed_times": 1}]},
+    {"task_id": "15", "task_name": "Daily Sign-in", "task_type": 1, "sign_today": False, "details": "<p>Sign in: 100/day</p>",
+     "reward_infos": [{"is_completed": False, "points": 100, "completed_times": 0, "need_completed_times": 1}]},
+]
+
+
+def test_checkin_task_by_type_then_name():
+    assert s.checkin_task(TASKS)["task_id"] == "15"
+    no_type = [{**t, "task_type": None} for t in TASKS]
+    assert s.checkin_task(no_type)["task_id"] == "15"  # English name fallback ("Sign-in")
+    assert s.checkin_task([TASKS[0]]) is None
+
+
+def test_tasks_and_checkin(monkeypatch):
+    sent = []
+
+    async def tasks():
+        return TASKS
+
+    async def call(path, body=None, **kw):
+        sent.append((path, body))
+        return {"total_points": 5, "total_points_earned": 9, "total_points_consumed": 4}
+    monkeypatch.setattr(s, "_tasks", tasks)
+    monkeypatch.setattr(s.bla, "call", call)
+    r = run(s.get_blablalink_tasks())
+    assert r["checked_in_today"] is False and r["earned"] == 9
+    assert r["tasks"][1]["details"] == "Sign in: 100/day"
+    c = run(s.daily_checkin())
+    assert c["claimed"] and ("/api/lip/proxy/lipass/Points/DailyCheckIn", {"task_id": "15"}) in sent
