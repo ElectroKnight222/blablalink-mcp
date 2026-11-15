@@ -1,4 +1,6 @@
 FROM python:3.12-slim
+LABEL org.opencontainers.image.source="https://github.com/ElectroKnight222/blablalink-mcp" \
+      org.opencontainers.image.description="Unofficial MCP server for NIKKE account data on blablalink.com"
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     BLABLALINK_CONFIG_DIR=/config TZ=Asia/Taipei
 WORKDIR /app
